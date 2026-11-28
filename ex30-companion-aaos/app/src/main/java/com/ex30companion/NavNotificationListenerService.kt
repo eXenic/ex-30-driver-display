@@ -182,12 +182,12 @@ class NavNotificationListenerService : NotificationListenerService() {
             bigText = bigText ?: ticker,
             iconHint = hintParts.joinToString("\n"),
         )
-        if (!parsed.active || parsed.maneuver != "none") {
+        if (parsed.maneuver != "none") {
             return parsed
         }
         val bitmapManeuver = inferManeuverFromIcons(notification, extras, rvData.bitmaps)
         return if (bitmapManeuver != "none") {
-            parsed.copy(maneuver = bitmapManeuver)
+            parsed.copy(active = true, maneuver = bitmapManeuver)
         } else {
             parsed
         }
