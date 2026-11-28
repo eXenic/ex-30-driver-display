@@ -345,5 +345,53 @@ class NavNotificationParserTest {
         assertTrue(trTurn.active)
         assertEquals("turn_right", trTurn.maneuver)
         assertEquals("1,2 km", trTurn.distance)
+
+        // Turkish initial heading cue ("Doğu yönünde ilerleyin")
+        val trHeading = NavNotificationParser.parse(title = "Doğu yönünde ilerleyin", text = null)
+        assertTrue(trHeading.active)
+        assertEquals("straight", trHeading.maneuver)
+    }
+
+    @Test
+    fun `icon resource hints and monochrome bitmap masks classify turn and roundabout maneuvers when text has only distance and street`() {
+        // 1. Drawable resource entry name hint (e.g. da_turn_right / ic_roundabout) resolves maneuver
+        val fromResHint = NavNotificationParser.parse(
+            title = "400 m",
+            text = "Bakü Cd.",
+            iconHint = "da turn right",
+        )
+        assertTrue(fromResHint.active)
+        assertEquals("turn_right", fromResHint.maneuver)
+        assertEquals("400 m", fromResHint.distance)
+
+        // 2. Monochrome bitmap mask: Right-turn arrow (vertical stem at x=10..13, horizontal top arm to x=14..26)
+        val rightMask = NavNotificationParser.classifyManeuverMask(32, 32) { x, y ->
+            (x in 10..13 && y in 10..27) || (y in 8..12 && x in 10..26)
+        }
+        assertEquals("turn_right", rightMask)
+
+        // 3. Monochrome bitmap mask: Left-turn arrow (vertical stem at x=18..21, horizontal top arm to x=5..21)
+        val leftMask = NavNotificationParser.classifyManeuverMask(32, 32) { x, y ->
+            (x in 18..21 && y in 10..27) || (y in 8..12 && x in 5..21)
+        }
+        assertEquals("turn_left", leftMask)
+
+        // 4. Monochrome bitmap mask: Straight arrow (centered vertical stem + symmetric head)
+        val straightMask = NavNotificationParser.classifyManeuverMask(32, 32) { x, y ->
+            (x in 14..17 && y in 6..27) || (y in 8..12 && x in 11..20)
+        }
+        assertEquals("straight", straightMask)
+
+        // 5. Monochrome bitmap mask: Roundabout (hollow ring around center + bottom entry stem + upper-right exit ray)
+        val roundaboutMask = NavNotificationParser.classifyManeuverMask(32, 32) { x, y ->
+            val dx = x - 16.0
+            val dy = y - 16.0
+            val r = kotlin.math.sqrt(dx * dx + dy * dy)
+            val inRing = r in 5.5..8.5
+            val inStem = x in 15..17 && y in 23..28
+            val inExit = (x - 16) in 4..10 && kotlin.math.abs((x - 16) - (16 - y)) <= 1
+            inRing || inStem || inExit
+        }
+        assertEquals("roundabout", roundaboutMask)
     }
 }

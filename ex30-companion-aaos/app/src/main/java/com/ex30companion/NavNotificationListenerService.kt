@@ -3,12 +3,18 @@ package com.ex30companion
 import android.app.Notification
 import android.content.ComponentName
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.Icon
 import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.core.app.NotificationManagerCompat
 import java.util.Locale
@@ -166,37 +172,57 @@ class NavNotificationListenerService : NotificationListenerService() {
             text = ticker
         }
 
-        return NavNotificationParser.parse(
+        val hintParts = LinkedHashSet<String>()
+        hintParts.addAll(rvData.descriptions)
+        extractIconResourceHints(notification, extras).forEach { hintParts.add(it) }
+
+        val parsed = NavNotificationParser.parse(
             title = title,
             text = text,
             bigText = bigText ?: ticker,
-            iconHint = rvData.descriptions.joinToString("\n"),
+            iconHint = hintParts.joinToString("\n"),
         )
+        if (!parsed.active || parsed.maneuver != "none") {
+            return parsed
+        }
+        val bitmapManeuver = inferManeuverFromIcons(notification, extras, rvData.bitmaps)
+        return if (bitmapManeuver != "none") {
+            parsed.copy(maneuver = bitmapManeuver)
+        } else {
+            parsed
+        }
     }
 
     private data class RemoteViewsData(
         val texts: List<String>,
         val descriptions: List<String>,
+        val bitmaps: List<Bitmap>,
     )
 
     @Suppress("DEPRECATION")
     private fun extractRemoteViewsData(n: Notification): RemoteViewsData {
         val candidates = listOfNotNull(n.bigContentView, n.contentView, n.headsUpContentView)
-        if (candidates.isEmpty()) return RemoteViewsData(emptyList(), emptyList())
+        if (candidates.isEmpty()) return RemoteViewsData(emptyList(), emptyList(), emptyList())
         val texts = LinkedHashSet<String>()
         val descs = LinkedHashSet<String>()
+        val bitmaps = mutableListOf<Bitmap>()
         val parent = FrameLayout(applicationContext)
         for (rv in candidates) {
             try {
                 val inflated = rv.apply(applicationContext, parent)
-                collectViews(inflated, texts, descs)
+                collectViews(inflated, texts, descs, bitmaps)
             } catch (_: Throwable) {
             }
         }
-        return RemoteViewsData(texts.toList(), descs.toList())
+        return RemoteViewsData(texts.toList(), descs.toList(), bitmaps)
     }
 
-    private fun collectViews(v: View?, texts: MutableSet<String>, descs: MutableSet<String>) {
+    private fun collectViews(
+        v: View?,
+        texts: MutableSet<String>,
+        descs: MutableSet<String>,
+        bitmaps: MutableList<Bitmap>,
+    ) {
         if (v == null || v.visibility == View.GONE) return
         v.contentDescription?.toString()?.replace(Regex("""[^\S\r\n]+"""), " ")?.trim()?.let { desc ->
             if (desc.isNotEmpty() && desc.lowercase(Locale("tr", "TR")) !in ACTION_LABELS) {
@@ -207,11 +233,121 @@ class NavNotificationListenerService : NotificationListenerService() {
             val s = v.text?.toString()?.replace(Regex("""[^\S\r\n]+"""), " ")?.trim().orEmpty()
             if (s.isNotEmpty()) texts.add(s)
         }
+        if (v is ImageView) {
+            drawableToBitmap(v.drawable)?.let { bitmaps.add(it) }
+        }
         if (v is ViewGroup) {
             for (i in 0 until v.childCount) {
-                collectViews(v.getChildAt(i), texts, descs)
+                collectViews(v.getChildAt(i), texts, descs, bitmaps)
             }
         }
+    }
+
+    private fun extractIconResourceHints(n: Notification, extras: Bundle): List<String> {
+        val hints = mutableListOf<String>()
+        val icons = mutableListOf<Icon>()
+        try {
+            n.getLargeIcon()?.let { icons.add(it) }
+        } catch (_: Throwable) {
+        }
+        try {
+            n.smallIcon?.let { icons.add(it) }
+        } catch (_: Throwable) {
+        }
+        @Suppress("DEPRECATION")
+        for (key in listOf(Notification.EXTRA_LARGE_ICON, Notification.EXTRA_LARGE_ICON_BIG, Notification.EXTRA_SMALL_ICON)) {
+            try {
+                val obj = extras.get(key)
+                if (obj is Icon) icons.add(obj)
+            } catch (_: Throwable) {
+            }
+        }
+        val mapsRes = try {
+            packageManager.getResourcesForApplication(NavNotificationSelector.GOOGLE_MAPS_PACKAGE)
+        } catch (_: Throwable) {
+            null
+        }
+        for (icon in icons) {
+            try {
+                if (icon.type == Icon.TYPE_RESOURCE && icon.resId != 0) {
+                    val resName = try {
+                        mapsRes?.getResourceEntryName(icon.resId)
+                    } catch (_: Throwable) {
+                        null
+                    }
+                    if (!resName.isNullOrBlank()) {
+                        hints.add(resName.replace('_', ' '))
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        return hints
+    }
+
+    @Suppress("DEPRECATION")
+    private fun inferManeuverFromIcons(
+        n: Notification,
+        extras: Bundle,
+        rvBitmaps: List<Bitmap>,
+    ): String {
+        val candidates = mutableListOf<Bitmap>()
+        try {
+            n.getLargeIcon()?.loadDrawable(applicationContext)?.let { d ->
+                drawableToBitmap(d)?.let { candidates.add(it) }
+            }
+        } catch (_: Throwable) {
+        }
+        for (key in listOf(Notification.EXTRA_LARGE_ICON, Notification.EXTRA_LARGE_ICON_BIG)) {
+            try {
+                when (val obj = extras.get(key)) {
+                    is Bitmap -> candidates.add(obj)
+                    is Icon -> obj.loadDrawable(applicationContext)?.let { d ->
+                        drawableToBitmap(d)?.let { candidates.add(it) }
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        candidates.addAll(rvBitmaps)
+        for (bmp in candidates) {
+            val maneuver = classifyBitmapIcon(bmp)
+            if (maneuver != "none") return maneuver
+        }
+        return "none"
+    }
+
+    private fun drawableToBitmap(d: Drawable?): Bitmap? {
+        if (d == null) return null
+        if (d is BitmapDrawable && d.bitmap != null) return d.bitmap
+        val w = d.intrinsicWidth.coerceIn(16, 128)
+        val h = d.intrinsicHeight.coerceIn(16, 128)
+        return try {
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            d.setBounds(0, 0, w, h)
+            d.draw(canvas)
+            bmp
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun classifyBitmapIcon(bmp: Bitmap): String {
+        val w = bmp.width
+        val h = bmp.height
+        if (w < 8 || h < 8) return "none"
+        val grid = BooleanArray(w * h) { idx ->
+            val x = idx % w
+            val y = idx / w
+            val c = bmp.getPixel(x, y)
+            val a = (c ushr 24) and 0xFF
+            val r = (c ushr 16) and 0xFF
+            val g = (c ushr 8) and 0xFF
+            val b = c and 0xFF
+            a >= 96 && (r + g + b) >= 240
+        }
+        return NavNotificationParser.classifyManeuverMask(w, h) { x, y -> grid[y * w + x] }
     }
 
     companion object {
